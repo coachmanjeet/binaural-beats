@@ -14,7 +14,7 @@
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f0f23; color: #fff; }
-  .wrap { max-width: 480px; margin: 0 auto; padding: 20px 16px 40px; }
+  .wrap { max-width: 480px; margin: 0 auto; padding: 16px 16px calc(100px + env(safe-area-inset-bottom)); }
   h1 { text-align: center; font-size: 28px; margin: 8px 0 4px; }
   .sub { text-align: center; color: #9ca3af; margin: 0 0 16px; font-size: 14px; line-height: 1.5; }
   .card { background: #1e1b4b; border-radius: 16px; padding: 16px; margin-bottom: 12px; }
@@ -24,18 +24,22 @@
   .presets button.active { border-color: #a5b4fc; background: #4338ca; }
   .presets button:active { opacity: 0.85; }
   .display { text-align: center; padding: 10px 0 4px; }
-  .beat-num { font-size: 76px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  .beat-num { font-size: 60px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
   .band { font-size: 22px; font-weight: 700; margin-top: 6px; }
   .band-desc { color: #c7d2fe; font-size: 14px; margin-top: 4px; }
   .ears { display: flex; justify-content: space-around; margin-top: 14px; font-size: 15px; color: #d1d5db; }
   .ears b { color: #fff; font-size: 19px; }
-  .field label { display: block; font-size: 13px; color: #9ca3af; margin: 14px 0 6px; }
+  .field label { display: block; font-size: 13px; color: #9ca3af; margin: 10px 0 5px; }
   .field label b { color: #fff; font-size: 15px; }
   .field input[type="range"] { width: 100%; accent-color: #818cf8; }
   .field select { width: 100%; padding: 12px; font-size: 17px; border: 0; border-radius: 10px; background: #312e81; color: #fff; }
   .big-btn { width: 100%; padding: 18px; font-size: 22px; font-weight: 700; border: 0; border-radius: 14px; background: #4f46e5; color: #fff; cursor: pointer; }
   .big-btn.stop { background: #b91c1c; }
   .big-btn:active { opacity: 0.9; }
+  /* PLAY stays on screen: fixed, not sticky, because a sticky element
+     only appears after scrolling to it, which is the complaint. Same
+     button, repositioned, so PLAY/STOP state needs no syncing. */
+  #playBtn { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(12px + env(safe-area-inset-bottom)); width: min(448px, calc(100vw - 32px)); z-index: 10; }
   .timer { text-align: center; font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 12px 0 4px; }
   .timer-sub { text-align: center; color: #9ca3af; font-size: 13px; margin-bottom: 12px; }
   .bar { height: 10px; background: rgba(255,255,255,0.15); border-radius: 5px; overflow: hidden; margin: 0 0 14px; }
@@ -46,6 +50,7 @@
 </style>
 </head>
 <body>
+<audio id="audioOut" style="position:fixed;left:0;bottom:0;width:1px;height:1px;opacity:0.01"></audio>
 <div class="wrap">
   <h1>Binaural Beats</h1>
   <p class="sub">Two tones, one in each ear. Your brain hears the difference.</p>
@@ -109,8 +114,9 @@
   <div class="bar"><div id="barFill"></div></div>
   <button class="big-btn" id="playBtn">PLAY</button>
 
-  <div class="card howto" style="margin-top:14px">
-    <b>How it works</b><br>
+  <details class="card howto" style="margin-top:14px">
+    <summary style="font-weight:700;color:#fff;cursor:pointer">How it works</summary>
+    <div style="margin-top:8px">
     Left ear plays one tone, right ear plays a slightly higher one. Your brain perceives a third tone, the difference. Example: 200 Hz left and 210 Hz right gives a 10 Hz beat. That beat only exists in your head.<br><br>
     <b>Delta (0.5-4 Hz):</b> deep sleep, rest<br>
     <b>Theta (4-8 Hz):</b> deep meditation, creativity, light sleep<br>
@@ -118,9 +124,10 @@
     <b>Beta (13-30 Hz):</b> focus, concentration, problem-solving<br>
     <b>Gamma (30+ Hz):</b> peak focus, flow state<br><br>
     Try 10 to 30 minutes at first and see how you respond. Experiences vary, and it does not suit everyone.
-  </div>
+    </div>
+  </details>
 
-  <p class="foot">All sound is generated live in your browser. Nothing is downloaded or recorded.<br>If audio stops when your phone locks, keep the app in the foreground.</p>
+  <p class="foot">All sound is generated live in your browser. Nothing is downloaded or recorded.<br>If audio stops when your phone locks, keep the app in the foreground.<br>v2: plays in silent mode, fixed play bar</p>
 </div>
 
 <script>
@@ -147,13 +154,27 @@ function fmt(s) {
 var ctx = null, master = null, leftOsc = null, rightOsc = null;
 var noiseSrc = null, noiseGain = null, noiseType = "off";
 var playing = false, fadeTimer = null;
+// Silent-mode routing: iOS Safari mutes raw Web Audio output when the
+// silent switch is on, but media-element playback plays regardless. So the
+// synth output goes through a media stream played by a hidden <audio>
+// element, which iOS treats as media. Tones, panning, volume, fade-out,
+// and noise all sit upstream of master, so the sound itself is unchanged.
+// If the browser has no MediaStreamDestination, fall back to direct output.
+var streamDest = null, audioOut = null;
 
 function ensureCtx() {
   if (ctx) { if (ctx.state === "suspended") ctx.resume(); return; }
   ctx = new (window.AudioContext || window.webkitAudioContext)();
   master = ctx.createGain();
   master.gain.value = 0;
-  master.connect(ctx.destination);
+  if (ctx.createMediaStreamDestination) {
+    streamDest = ctx.createMediaStreamDestination();
+    master.connect(streamDest);
+    audioOut = $("audioOut");
+    audioOut.srcObject = streamDest.stream;
+  } else {
+    master.connect(ctx.destination);
+  }
 }
 function pan(node, side) {
   if (window.StereoPannerNode) {
@@ -260,6 +281,14 @@ function play() {
   pan(leftOsc, -1); pan(rightOsc, 1);
   leftOsc.start(); rightOsc.start();
   startNoise();
+  // Play the media element inside this tap: iOS allows it from a gesture,
+  // and it is what makes the output count as media (silent-switch-proof).
+  if (audioOut) {
+    try {
+      var p = audioOut.play();
+      if (p && p.catch) { p.catch(function () {}); }
+    } catch (e) {}
+  }
   master.gain.cancelScheduledValues(ctx.currentTime);
   master.gain.setTargetAtTime(targetVolume(), ctx.currentTime, 0.7);
   playing = true;
@@ -282,6 +311,7 @@ function endSession(finished) {
   stopTimer();
   if (!playing) return;
   playing = false;
+  if (audioOut) { try { audioOut.pause(); } catch (e) {} }
   master.gain.setTargetAtTime(0, ctx.currentTime, 0.7);
   fadeTimer = setTimeout(function () {
     if (leftOsc) { try { leftOsc.stop(); } catch (e) {} try { rightOsc.stop(); } catch (e) {} }
